@@ -7,6 +7,8 @@ from sqlite3 import Error
 from gspread_formatting import *
 import requests
 import os
+from dataclasses import dataclass
+from datetime import datetime
 
 class StoreData:
     def __init__(self, name):
@@ -42,7 +44,34 @@ class StoreData:
         with open(file, 'wb') as saveFile:
             saveFile.write(r.content)
 
+@dataclass
+class Order:
+    name: str
+    order_id: int = 0
+    order_date: str = None
+    submission_date: str = None
+    submission_id: str = None
+    email: str = None
+    phone: str = None
+    comment: str = None
+    payment: str = None
+    delivery_date: str = None
+    location: str = None
 
+    def __init__(self, name):
+        self.name = name
+
+@dataclass
+class OrderItem:
+    order_id: int
+    store: str = None
+    product: str = None
+    options: str = None
+    quantity: int = 0
+    price: float = 0.0
+
+    # def __init__(self, order_id):
+    #     self.order_id = order_id
 
 
 def process_spreadsheet(conn, retrieve_records):
@@ -63,27 +92,32 @@ def process_spreadsheet(conn, retrieve_records):
         # Extract and print all of the values
         records = sheet.get_all_records()
         print("Processing orders...")
-        for order in records:
-            process_order(conn, order)
+        #for order in records:
+        #    process_order(conn, order)
+        process_extra_order(conn, wk)
     else:
         categories = wk.worksheet("ProductCategories").get_all_records()
         stores = [cat['name'] for cat in categories]
-    delivery_date = "6/7"
-    resume_id = 1
+    delivery_date = "6/14"
+    resume_id = 20
     i = 1
     for store_name in stores:
         if i >= resume_id:
             analyze_store(conn, wk, delivery_date, store_name)
         i+=1
     analyze_customers(conn, wk, delivery_date)
-    #
-    #analyze_store(conn, wk, delivery_date, '一芳水果茶')
 
 def save_order_item(conn, order_id, name, options, amount, quantity, store=None):
     print("Saving order %s %s, %s, %f, %d" % (store, name, options, amount, quantity))
     order_sql = "insert into order_items (order_id, store, product_name, product_options, product_unit_price, quantity) values (?,?,?,?,?,?)"
     cur = conn.cursor()
     cur.execute(order_sql, (order_id, store, name, options, amount, quantity))
+
+def save_order_item1(conn, item):
+    print("Saving order %s %s, %s, %f, %d" % (item.store, item.product, item.options, item.price, item.quantity))
+    order_sql = "insert into order_items (order_id, store, product_name, product_options, product_unit_price, quantity) values (?,?,?,?,?,?)"
+    cur = conn.cursor()
+    cur.execute(order_sql, (item.order_id, item.store, item.product, item.options, item.price, item.quantity))
 
 def process_order_group1(conn, order_id, data):
     for line in data.split("\n"):
@@ -139,6 +173,20 @@ def process_order_group2(conn, order_id, data):
         return float(total)
     return 0
 
+def save_order(conn, order):
+    order_sql = "insert into orders (order_date, name, email, phone, submission_id, payment, comment, delivery_date, location) values (?,?,?,?,?,?,?,?,?)"
+    cur = conn.cursor()
+    cur.execute(order_sql, [order.order_date, order.name, order.email, order.phone, order.submission_id, order.payment, order.comment, order.delivery_date, order.location])
+    cur.execute("select last_insert_rowid()")
+    order.order_id = cur.fetchone()[0]
+    print("orderid: %d, name: %s" % (order.order_id, order.name))
+    conn.commit()
+    return order.order_id
+
+def process_delivery(delivery_str):
+    delivery = delivery_str.split(" ")
+    return delivery[0].strip(), (" ".join(delivery[1:])).strip()
+
 def process_order(conn, order):
     date = order['Submission Date']
     if not date.strip():
@@ -146,7 +194,7 @@ def process_order(conn, order):
     print(date)
     order_sql = "insert into orders (order_date, name, email, phone, submission_id, payment, comment, delivery_date, location) values (?,?,?,?,?,?,?,?,?)"
     delivery = order['Delivery Date'].split(" ")
-    order_array = [order['Submission Date'], order['First Name'] + " " + order['Last Name'], order['Email'], order['Phone Number'], order['Submission ID'], order['Payment'], order['Comments'], delivery[0], delivery[1] ]
+    order_array = [order['Submission Date'], order['First Name'] + " " + order['Last Name'], order['Email'], order['Phone Number'], order['Submission ID'], order['Payment'], order['Comments'], delivery[0], " ".join(delivery[1:]) ]
     cur = conn.cursor()
     cur.execute(order_sql, order_array)
     cur.execute("select last_insert_rowid()")
@@ -159,6 +207,34 @@ def process_order(conn, order):
     update_sql = "update orders set total=? where id=?"
     cur.execute(update_sql, (total, order_id))
     conn.commit()
+
+def process_extra_order(conn, wk):
+    extra_order = wk.worksheet("ExtraOrders").get_all_records()
+    for extra in extra_order:
+        process_extra_order_sheet(conn, wk, extra["Location"], extra["Sheet"])
+
+def process_extra_order_sheet(conn, wk, delivery_str, sheet_name):
+    records = wk.worksheet(sheet_name).get_all_records()
+    delivery_date, location = process_delivery(delivery_str)
+    last_name = None
+    for record in records:
+        name = record["訂購人"]
+        if not name:
+            continue
+        if last_name != name:
+            order = Order(name)
+            order.order_date = datetime.now()
+            order.delivery_date = delivery_date
+            order.location = location
+            save_order(conn, order)
+            last_name = name
+        item = OrderItem(order.order_id)
+        item.store = record["店名"]
+        item.product = record["菜名"]
+        item.price = float(record["單價"].replace("$",""))
+        item.quantity = int(record["數量"])
+        save_order_item1(conn, item)
+        
 
 def create_connection(db_file):
     """ create a database connection to the SQLite database
@@ -250,6 +326,7 @@ def init_products(conn, products, categories):
     sql_create_order_items_table = """CREATE TABLE IF NOT EXISTS product_categories (
                                     id integer PRIMARY KEY,
                                     name text,
+                                    alias text,
                                     tax integer
                                 );"""
     stores = []
@@ -258,10 +335,10 @@ def init_products(conn, products, categories):
         execute_sql(conn, sql_drop2)
         execute_sql(conn, sql_create_orders_table)
         execute_sql(conn, sql_create_order_items_table)
-        insert_sql = "insert into product_categories (id, name, tax) values (?,?,?)"
+        insert_sql = "insert into product_categories (id, name, alias, tax) values (?,?,?,?)"
         cur = conn.cursor()
         for item in categories:
-            cur.execute(insert_sql, (item['id'], item['name'], item['tax']))
+            cur.execute(insert_sql, (item['id'], item['name'], item['alias'], item['tax']))
             stores.append(item['name'])
         insert_sql = "insert into products (category_id, name, options, price) values (?,?,?,?)"
         for item in products:
@@ -302,7 +379,7 @@ def add_header_user(store, row_num, location, customer, comment):
     row_num += 1
     store.cells.append(gspread.Cell(row_num, 1, location))
     store.cells.append(gspread.Cell(row_num, 2, customer))
-    store.cells.append(gspread.Cell(row_num, 3, comment))
+    #store.cells.append(gspread.Cell(row_num, 3, comment))
     fmt = cellFormat(
     backgroundColor=Color.fromHex('#ffff00'),
     textFormat=textFormat(bold=True, foregroundColor=color(0, 0, 0)),
@@ -543,7 +620,7 @@ def get_sheet(wk, name, clean = True):
     return result
 
 def main():
-    retrieve_records = False
+    retrieve_records = True
     conn = init_db(retrieve_records)
     process_spreadsheet(conn, retrieve_records)
     if conn:
