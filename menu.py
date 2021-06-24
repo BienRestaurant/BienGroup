@@ -13,7 +13,8 @@ from datetime import datetime
 @dataclass
 class Order:
     name: str
-    order_id: int = 0
+    id: int = 0,
+    order_uid: int = 0
     order_date: str = None
     submission_id: str = None
     email: str = None
@@ -22,6 +23,7 @@ class Order:
     payment: str = None
     delivery_date: str = None
     location: str = None
+    delivery_address: str = None
 
     def __init__(self, name):
         self.name = name
@@ -31,6 +33,7 @@ class Order:
     
     def set_from_jotform(self, order):
         self.order_date = order['Submission Date']
+        self.order_uid = order['Order ID']
         self.name = order['First Name'] + " " + order['Last Name']
         self.email = order['Email']
         self.phone = order['Phone Number']
@@ -38,6 +41,7 @@ class Order:
         self.payment = order['Payment']
         self.comment = order['Comments']
         self.set_delivery_info(order['Delivery Date'])
+        self.delivery_address = order['Delivery Address']
 
 @dataclass
 class OrderItem:
@@ -48,6 +52,7 @@ class OrderItem:
     options: str = None
     quantity: int = 0
     price: float = 0.0
+    order: Order = None
 
 
 @dataclass
@@ -107,7 +112,9 @@ class Database:
         sql_create_orders_table = """ CREATE TABLE IF NOT EXISTS orders (
                                             id integer PRIMARY KEY,
                                             order_date datetime NOT NULL,
+                                            order_uid text,
                                             delivery_date text,
+                                            delivery_address text,
                                             location text,
                                             name text NOT NULL,
                                             email text,
@@ -190,8 +197,10 @@ class Database:
 
     def update_store_lookup(self, stores):
         self.store_lookup = {}
+        self.store_lookup_by_id = {}
         for store in stores:
             self.store_lookup[store.name] = store
+            self.store_lookup_by_id[store.id] = store
             if store.alias:
                 for a in store.alias.split(","):
                     self.store_lookup[a] = store
@@ -199,15 +208,29 @@ class Database:
     def update_product_lookup(self, products):
         self.product_lookup = {}
         for product in products:
-            print("creating lookup %s = %d" % (product.name, product.store_id))
+            #print("creating lookup %s = %d" % (product.name, product.store_id))
             self.product_lookup[product.name] = product
     
+    def get_store_by_name(self, name):
+        s = self.store_lookup.get(name)
+        if s:
+            return s
+        return None
+
     def get_store_id_by_name(self, name):
         s = self.store_lookup.get(name)
         if s:
             return s.id
         return None
     
+    def get_store_by_product(self, name):
+        p = self.product_lookup.get(name)
+        if p:
+            return self.store_lookup_by_id[p.store_id]
+        if name != "**配送地點**":
+            print(name +" is not found.")
+        return None
+
     def get_store_id_by_product(self, name):
         p = self.product_lookup.get(name)
         if p:
@@ -234,28 +257,42 @@ class Database:
         return rows
 
     def query_store_customers(self, store_name, delivery_date):
-        sql ="""select o.location, o.name, i.product_name as product, i.product_options as options, i.quantity as quantity, o.comment
+        sql ="""select o.id, o.location, o.name, o.comment, o.order_uid, i.product_name as product, i.product_options as options, i.quantity as quantity
         from order_items i
         left join orders o
         on i.order_id = o.id
         left join stores c
         on i.store_id = c.id
         where o.delivery_date = ? and c.name = ?   
-        order by o.location, o.name, i.product_name
+        order by o.location, o.order_uid, i.product_name
         """
         cur = self.conn.cursor()
         cur.execute(sql, (delivery_date, store_name))
-        return cur.fetchall()
-    
+        items = []
+        for row in cur.fetchall():
+            order = Order(row[2])
+            order.id = row[0]
+            order.location = row[1]
+            order.comment = row[3]
+            order.order_uid = row[4]
+            item = OrderItem(order.id)
+            item.order = order
+            item.product = row[5]
+            item.options = row[6]
+            item.quantity = row[7]
+            items.append(item)
+        return items
+
+
     def query_customers(self, delivery_date):
-        sql ="""select o.location, o.name, c.name as store, i.product_name as product, i.product_options as options, i.product_unit_price as price, i.quantity as quantity, c.tax, o.comment
+        sql ="""select o.location, o.order_uid, o.name, c.name as store, i.product_name as product, i.product_options as options, i.product_unit_price as price, i.quantity as quantity, c.tax, o.comment, o.delivery_address as address, o.email, o.phone
             from order_items i
             left join orders o
             on i.order_id = o.id
             left join stores c
             on i.store_id = c.id
             where o.delivery_date = ?
-            order by o.location, o.name, c.id, i.product_name
+            order by o.location, o.order_uid, o.name, c.id, i.product_name
         """        
         print("Analyzing customers (%s)..." % (delivery_date))
         cur = self.conn.cursor()
@@ -263,14 +300,14 @@ class Database:
         return cur.fetchall()
 
     def save_order(self, order):
-        order_sql = "insert into orders (order_date, name, email, phone, submission_id, payment, comment, delivery_date, location) values (?,?,?,?,?,?,?,?,?)"
+        order_sql = "insert into orders (order_date, order_uid, name, email, phone, submission_id, payment, comment, delivery_date, location, delivery_address) values (?,?,?,?,?,?,?,?,?,?,?)"
         cur = self.conn.cursor()
-        cur.execute(order_sql, [order.order_date, order.name, order.email, order.phone, order.submission_id, order.payment, order.comment, order.delivery_date, order.location])
+        cur.execute(order_sql, [order.order_date, order.order_uid, order.name, order.email, order.phone, order.submission_id, order.payment, order.comment, order.delivery_date, order.location, order.delivery_address])
         cur.execute("select last_insert_rowid()")
-        order.order_id = cur.fetchone()[0]
-        print("orderid: %d, name: %s" % (order.order_id, order.name))
+        order.id = cur.fetchone()[0]
+        print("orderid: %d, name: %s" % (order.id, order.name))
         self.conn.commit()
-        return order.order_id
+        return order.id
 
     def save_order_item1(self, item):
         print("Saving order %s(%d) %s, %s, %f, %d" % (item.store, item.store_id, item.product, item.options, item.price, item.quantity))
@@ -298,12 +335,15 @@ class StoreData:
     def create_sheet(self, worksheet, delivery_date):
         self.delivery_date = delivery_date
         self.file_name = self.name + " " + delivery_date
+        self.worksheet_id = worksheet.id
         self.sheet = get_sheet(worksheet, self.file_name)
 
     def get_link(self):
         url_format = "https://spreadsheets.google.com/feeds/download/spreadsheets/Export?key=%s&exportFormat=%s&gid=%i"
+        #url_format = "https://docs.google.com/spreadsheets/d/%s/gviz/tq?tqx=out:%s&gid=%s"
         #return url_format % ("15x2NG_HhyVZCnzcVkjq1WCx20Zo4TvRDSLS3ASsaxbA", "pdf", self.sheet.id)
-        return url_format % ("18czRzyYOEdMO6IXpatYRk3DWcBUAJyC_iEZDG5nlgys", "pdf", self.sheet.id)
+        #return url_format % ("18czRzyYOEdMO6IXpatYRk3DWcBUAJyC_iEZDG5nlgys", "pdf", self.sheet.id)
+        return url_format % (self.worksheet_id, "pdf", self.sheet.id)
 
     def append_cell(self, row, col, value):
         self.cells.append(gspread.Cell(row, col, value))
@@ -315,6 +355,7 @@ class StoreData:
         self.sheet.update_cells(self.cells)
         format_cell_ranges(self.sheet, self.formats)
         url = self.get_link()
+        #print("exporting from: %s" % url)
         r = requests.get(url)
         home = os.path.expanduser("~")
         downloads = os.path.join(home, "Downloads")
@@ -323,7 +364,7 @@ class StoreData:
         with open(file, 'wb') as saveFile:
             saveFile.write(r.content)
 
-def process_spreadsheet(db, retrieve_records):
+def process_spreadsheet(db, retrieve_records, date, is_customer_only):
     # use creds to create a client to interact with the Google Drive API
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
     creds = ServiceAccountCredentials.from_json_keyfile_name('client_secret.json', scope)
@@ -336,26 +377,27 @@ def process_spreadsheet(db, retrieve_records):
         products = wk.worksheet("Products").get_all_records()
         categories = wk.worksheet("Stores").get_all_records()
         stores = db.init_products(products, categories)
-        sheet = wk.worksheet("阿扁私房菜")
+        sheet = wk.worksheet("Orders")
 
         # Extract and print all of the values
         records = sheet.get_all_records()
         print("Processing orders...")
         for order in records:
             process_order(db, order)
-        #process_extra_order(db, wk)
+        process_extra_order(db, wk)
     else:
         categories = wk.worksheet("Stores").get_all_records()
         stores = [Store(cat['id'], cat['name']) for cat in categories]
     
     output_wk = client.open("阿扁美食團出菜")
-    delivery_date = "6/12"
-    resume_id = 1
+    delivery_date = date
+    resume_id = 15
     i = 1
-    for store in stores:
-        if i >= resume_id:
-            analyze_store(db, output_wk, delivery_date, store.name)
-        i+=1
+    if not is_customer_only:
+        for store in stores:
+            if i >= resume_id:
+                analyze_store(db, output_wk, delivery_date, store.name)
+            i+=1
     analyze_customers(db, output_wk, delivery_date)
 
 def process_order_group1(db, order_id, data):
@@ -371,18 +413,24 @@ def process_order_group1(db, order_id, data):
                 name = results[0].strip()
                 #print("item name:" + name)
                 quantity = 1
-                amount = 0
+                price = 0
                 values = results[1].split(")")[0] #ount: 16.00 USD, Quantity: 1)
                 for v in values.split(", "):
                     if v.startswith("ount:"): #ount: 16.00 USD
-                        amount = float(v.split(" ")[1])
+                        price = float(v.split(" ")[1])
                     elif v.startswith("Quantity:"): #Quantity: 1
                         quantity = int(v.split(" ")[1])
                     else:
                         options.append(v.split(": ")[1])
-                if amount != 0:
-                    store_id = db.get_store_id_by_product(name)
-                    db.save_order_item(order_id, name, store_id, ",".join(options), amount, quantity)
+                if price != 0:
+                    store = db.get_store_by_product(name)
+                    if store:
+                        store_id = store.id
+                        if store.tax == 1:
+                            price = round(price / 1.08875, 2)                    
+                    else:
+                        store_id = db.get_store_id_by_product(name)
+                    db.save_order_item(order_id, name, store_id, ",".join(options), price, quantity)
     return total
 
 def process_order_group2(db, order_id, data):
@@ -404,13 +452,18 @@ def process_order_group2(db, order_id, data):
                 if offset == 0:
                     store = results[1][1]
                 options = results[options_col + offset][1].strip()
+                if not results[price_col + offset][1]:
+                    continue
                 price = float(results[price_col + offset][1].strip())
-                quantity = int(results[quantity_col + offset][1].strip())
-                if store:
-                    store_id = db.get_store_id_by_name(store)
-                else:
-                    store_id = db.get_store_id_by_product(name)
-                db.save_order_item(order_id, name, store_id, options, price, quantity, store)
+                qty_str = results[quantity_col + offset][1].strip()
+                if qty_str:
+                    quantity = int(qty_str)
+                    if store:
+                        store_id = db.get_store_id_by_name(store)
+                    else:
+                        store_id = db.get_store_id_by_product(name)
+                    
+                    db.save_order_item(order_id, name, store_id, options, price, quantity, store)
             elif results[total_col-1][1] == "飲料Total":                
                 total = results[total_col][1]
     if total:
@@ -453,11 +506,17 @@ def process_extra_order_sheet(db, wk, delivery_str, sheet_name):
             order.set_delivery_info(delivery_str)
             db.save_order(order)
             last_name = name
-        item = OrderItem(order.order_id)
+        item = OrderItem(order.id)
         item.store = record["店名"]
-        item.store_id = db.get_store_id_by_name(item.store)
+        store = db.get_store_by_name(item.store)
+        if store:
+            item.store_id = store.id
+
         item.product = record["菜名"]
         item.price = float(record["單價"].replace("$",""))
+        if store.tax == 1:
+            item.price = round(item.price / 1.08875, 2)
+
         item.quantity = int(record["數量"])
         db.save_order_item1(item)
         
@@ -489,19 +548,18 @@ def add_header_store(store):
     store.append_format("A%d:E%d" % (row_num, row_num), fmt)
     return row_num
 
-def add_header_user(store, row_num, location, customer, comment):
+def add_header_user(store, row_num, order):
     row_num += 1
-    store.cells.append(gspread.Cell(row_num, 1, location))
-    store.cells.append(gspread.Cell(row_num, 2, customer))
-    #store.cells.append(gspread.Cell(row_num, 3, comment))
+    store.cells.append(gspread.Cell(row_num, 1, order.location))
+    store.cells.append(gspread.Cell(row_num, 2, order.order_uid))
+    store.cells.append(gspread.Cell(row_num, 3, order.name))
     fmt = cellFormat(
     backgroundColor=Color.fromHex('#ffff00'),
     textFormat=textFormat(bold=True, foregroundColor=color(0, 0, 0)),
     horizontalAlignment='CENTER',
     verticalAlignment='MIDDLE'
     )
-    #format_cell_range(sheet, "A%d:B%d" % (row_num, row_num), fmt)
-    store.append_format("A%d:B%d" % (row_num, row_num), fmt)
+    store.append_format("A%d:C%d" % (row_num, row_num), fmt)
 
     row_num += 1
     store.cells.append(gspread.Cell(row_num, 1, "Product"))
@@ -565,50 +623,47 @@ def analyze_store(db, wk, delivery_date, store_name):
 
     close_store(store, row_num, store_total)
 
-    rows = db.query_store_customers(store_name, delivery_date)    
-    #store_cells = []
+    items = db.query_store_customers(store_name, delivery_date)    
     row_num += 2
-    #add_header_user(store_sheet, row_num, store_cells)
     current_name=None
     total_items = 0
-    save_total = None
     row_num += 1
-    for row in rows:
-        #print(row)
-        location = row[0]
-        customer = row[1]
-        comment = row[5]                        
+    for item in items:
+        order = item.order
         if not current_name:
-            current_name = customer
-            row_num = add_header_user(store, row_num, location, customer, comment) + 1
-        elif current_name != customer:
+            current_name = order.name
+            row_num = add_header_user(store, row_num, order) + 1
+        elif current_name != order.name:
             store.cells.append(gspread.Cell(row_num-1, 4, total_items))
-            row_num = add_header_user(store, row_num, location, customer, comment) + 1
-            save_total = total_items
+            row_num = add_header_user(store, row_num, order) + 1
             total_items = 0
-            current_name = customer
-        total_items += int(row[4])
-        store.cells.append(gspread.Cell(row_num, 1, row[2]))
-        store.cells.append(gspread.Cell(row_num, 2, row[3]))
-        store.cells.append(gspread.Cell(row_num, 3, row[4]))
+            current_name = order.name
+        total_items += int(item.quantity)
+        store.cells.append(gspread.Cell(row_num, 1, item.product))
+        store.cells.append(gspread.Cell(row_num, 2, item.options))
+        store.cells.append(gspread.Cell(row_num, 3, item.quantity))
         row_num += 1
 
     store.cells.append(gspread.Cell(row_num-1, 4, total_items))
-    #store_sheet.update_cells(store_cells)
     store.submit()
 
-def add_header_user2(store, row_num, location, customer, comment):
+def add_header_user2(store, row_num, location, order_uid, customer, comment, address, email, phone):
     row_num += 1
     store.append_cell(row_num, 1, location)
-    store.append_cell(row_num, 2, customer)
-    store.append_cell(row_num, 3, comment)
+    store.append_cell(row_num, 2, order_uid)
+    store.append_cell(row_num, 3, customer)
+    store.append_cell(row_num, 4, comment)
     fmt = cellFormat(
     backgroundColor=Color.fromHex('#ffff00'),
     textFormat=textFormat(bold=True, foregroundColor=color(0, 0, 0)),
     horizontalAlignment='CENTER',
     verticalAlignment='MIDDLE'
     )
-    store.append_format("A%d:B%d" % (row_num, row_num), fmt)
+    store.append_format("A%d:C%d" % (row_num, row_num), fmt)
+    row_num += 1
+    store.append_cell(row_num, 1, email)
+    store.append_cell(row_num, 2, phone)
+    store.append_cell(row_num, 3, address)
     row_num += 1
     store.append_cell(row_num, 1, "Store")
     store.append_cell(row_num, 2, "Product")
@@ -640,27 +695,31 @@ def analyze_customers(db, wk, delivery_date):
     for i, row in enumerate(rows):
         #print(row)
         location = row[0]
-        customer = row[1]
-        price = row[5]
-        quantity = row[6]
-        comment = row[8]
+        order_uid = row[1]
+        customer = row[2]
+        price = row[6]
+        quantity = row[7]
+        comment = row[9]
+        address = row[10]
+        email = row[11]
+        phone = row[12]
         if not current_name:
             current_name = customer
-            row_num = add_header_user2(store, row_num, location, customer, comment) + 1
+            row_num = add_header_user2(store, row_num, location, order_uid, customer, comment,address, email, phone) + 1
         elif current_name != customer:
             store.append_cell(row_num, 5, total_items)
             store.append_cell(row_num, 6, dollar(customer_total))
-            row_num = add_header_user2(store, row_num, location, customer, comment) + 1
+            row_num = add_header_user2(store, row_num, location, order_uid, customer, comment, address, email, phone) + 1
             customer_total = total_items = 0
             current_name = customer
 
         total_items += int(quantity)
-        store.append_cell(row_num, 1, row[2])
-        store.append_cell(row_num, 2, row[3])
-        store.append_cell(row_num, 3, row[4])
+        store.append_cell(row_num, 1, row[3])
+        store.append_cell(row_num, 2, row[4])
+        store.append_cell(row_num, 3, row[5])
         store.append_cell(row_num, 4, price)
         store.append_cell(row_num, 5, quantity)
-        total = calc_total(quantity, price, row[7])
+        total = calc_total(quantity, price, row[8])
         store.append_cell(row_num, 6, dollar(total))
         row_num += 1
         customer_total += total
@@ -688,10 +747,12 @@ def get_sheet(wk, name, clean = True):
     return result
 
 def main():
-    retrieve_records = True
+    retrieve_records = False
+    date = "6/26"
+    is_customer_only = False
     db = Database("bien.db")
     db.init_db(retrieve_records)
-    process_spreadsheet(db, retrieve_records)
+    process_spreadsheet(db, retrieve_records, date, is_customer_only)
     if db:
         db.close()
 
