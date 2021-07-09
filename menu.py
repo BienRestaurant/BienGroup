@@ -305,7 +305,7 @@ class Database:
         cur.execute(order_sql, [order.order_date, order.order_uid, order.name, order.email, order.phone, order.submission_id, order.payment, order.comment, order.delivery_date, order.location, order.delivery_address])
         cur.execute("select last_insert_rowid()")
         order.id = cur.fetchone()[0]
-        print("orderid: %d, name: %s" % (order.id, order.name))
+        print("orderid: %s(%d), name: %s" % (order.order_uid, order.id, order.name))
         self.conn.commit()
         return order.id
 
@@ -364,7 +364,7 @@ class StoreData:
         with open(file, 'wb') as saveFile:
             saveFile.write(r.content)
 
-def process_spreadsheet(db, retrieve_records, date, is_customer_only):
+def process_spreadsheet(db, retrieve_records, delivery_date, is_customer_only):
     # use creds to create a client to interact with the Google Drive API
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
     creds = ServiceAccountCredentials.from_json_keyfile_name('client_secret.json', scope)
@@ -383,15 +383,14 @@ def process_spreadsheet(db, retrieve_records, date, is_customer_only):
         records = sheet.get_all_records()
         print("Processing orders...")
         for order in records:
-            process_order(db, order)
-        process_extra_order(db, wk)
+            process_order(db, delivery_date, order)
+        process_extra_order(db, delivery_date, wk)
     else:
         categories = wk.worksheet("Stores").get_all_records()
         stores = [Store(cat['id'], cat['name']) for cat in categories]
     
     output_wk = client.open("阿扁美食團出菜")
-    delivery_date = date
-    resume_id = 15
+    resume_id = 1
     i = 1
     if not is_customer_only:
         for store in stores:
@@ -426,8 +425,8 @@ def process_order_group1(db, order_id, data):
                     store = db.get_store_by_product(name)
                     if store:
                         store_id = store.id
-                        if store.tax == 1:
-                            price = round(price / 1.08875, 2)                    
+                        # if store.tax == 1:
+                        #     price = round(price / 1.08875, 2)                    
                     else:
                         store_id = db.get_store_id_by_product(name)
                     db.save_order_item(order_id, name, store_id, ",".join(options), price, quantity)
@@ -474,22 +473,27 @@ def process_delivery(delivery_str):
     delivery = delivery_str.split(" ")
     return delivery[0].strip(), (" ".join(delivery[1:])).strip()
 
-def process_order(db, order):
+def process_order(db, delivery_date, order):
     date = order['Submission Date']
     if not date.strip():
         return
     print(date)
     order_data = Order("")
     order_data.set_from_jotform(order)
+    if delivery_date != order_data.delivery_date:
+        return #skipping
     order_id = db.save_order(order_data)
     total = process_order_group1(db, order_id, order['食物: Products'])
     total += process_order_group2(db, order_id, order['冰品飲料'])
     print("total: %f" % total)
     db.update_total(order_id, total)
 
-def process_extra_order(db, wk):
+def process_extra_order(db, delivery_date, wk):
     extra_order = wk.worksheet("ExtraOrders").get_all_records()
     for extra in extra_order:
+        date, location = process_delivery(extra["Location"])
+        if (delivery_date != date):
+            return
         process_extra_order_sheet(db, wk, extra["Location"], extra["Sheet"])
 
 def process_extra_order_sheet(db, wk, delivery_str, sheet_name):
@@ -514,8 +518,8 @@ def process_extra_order_sheet(db, wk, delivery_str, sheet_name):
 
         item.product = record["菜名"]
         item.price = float(record["單價"].replace("$",""))
-        if store.tax == 1:
-            item.price = round(item.price / 1.08875, 2)
+        # if store.tax == 1:
+        #     item.price = round(item.price / 1.08875, 2)
 
         item.quantity = int(record["數量"])
         db.save_order_item1(item)
@@ -553,6 +557,7 @@ def add_header_user(store, row_num, order):
     store.cells.append(gspread.Cell(row_num, 1, order.location))
     store.cells.append(gspread.Cell(row_num, 2, order.order_uid))
     store.cells.append(gspread.Cell(row_num, 3, order.name))
+    store.cells.append(gspread.Cell(row_num, 4, order.comment))
     fmt = cellFormat(
     backgroundColor=Color.fromHex('#ffff00'),
     textFormat=textFormat(bold=True, foregroundColor=color(0, 0, 0)),
@@ -747,8 +752,8 @@ def get_sheet(wk, name, clean = True):
     return result
 
 def main():
-    retrieve_records = False
-    date = "6/26"
+    retrieve_records = True
+    date = "7/10"
     is_customer_only = False
     db = Database("bien.db")
     db.init_db(retrieve_records)
