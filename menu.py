@@ -377,13 +377,10 @@ def process_spreadsheet(db, retrieve_records, delivery_date, is_customer_only):
         products = wk.worksheet("Products").get_all_records()
         categories = wk.worksheet("Stores").get_all_records()
         stores = db.init_products(products, categories)
-        sheet = wk.worksheet("Orders")
-
-        # Extract and print all of the values
-        records = sheet.get_all_records()
-        print("Processing orders...")
-        for order in records:
-            process_order(db, delivery_date, order)
+        process_order_sheet(db, delivery_date, wk, "Orders")
+        process_order_sheet(db, delivery_date, wk, "Orders-A")
+        process_order_sheet(db, delivery_date, wk, "Orders-A1")
+        process_order_sheet(db, delivery_date, wk, "Order-B")
         process_extra_order(db, delivery_date, wk)
     else:
         categories = wk.worksheet("Stores").get_all_records()
@@ -398,6 +395,28 @@ def process_spreadsheet(db, retrieve_records, delivery_date, is_customer_only):
                 analyze_store(db, output_wk, delivery_date, store.name)
             i+=1
     analyze_customers(db, output_wk, delivery_date)
+
+def process_order_sheet(db, delivery_date, work_sheet, sheet_name):
+    sheet = work_sheet.worksheet(sheet_name)
+    records = sheet.get_all_records()
+    print("Processing %s..." % (sheet_name))
+    for order in records:
+        process_order(db, delivery_date, order)
+
+def process_order(db, delivery_date, order):
+    date = order['Submission Date']
+    if not date.strip():
+        return
+    print(date)
+    order_data = Order("")
+    order_data.set_from_jotform(order)
+    if delivery_date != order_data.delivery_date:
+        return #skipping
+    order_id = db.save_order(order_data)
+    total = process_order_group1(db, order_id, order['食物: Products'])
+    total += process_order_group2(db, order_id, order['冰品飲料'])
+    print("total: %f" % total)
+    db.update_total(order_id, total)
 
 def process_order_group1(db, order_id, data):
     for line in data.split("\n"):
@@ -439,6 +458,7 @@ def process_order_group2(db, order_id, data):
     quantity_col = 5
     offset = 0
     store = ''
+    last_store_id = None
     for line in (data+" ").split("\n"): 
         if line and not line.startswith("0: #,"): #0: #, 1: 品項, 2: 配料, 3: 單價, 4: 數量, 5: 總價
             results = [item.split(": ") for item in line.split(", ")] #0: 1, 1: 手工豆花, 2: 芋圓, 3: 5.50, 4: 2, 5: 11
@@ -447,10 +467,11 @@ def process_order_group2(db, order_id, data):
                 offset = -1
             #print(results)
             name = results[name_col + offset][1].strip()
-            if results[total_col][1] and name: #0: 11, 1: , 2: , 3: , 4: 飲料Total, 5: 11
+            options = results[options_col + offset][1].strip()
+            #user can just input options
+            if results[total_col][1] and (name or options): #0: 11, 1: , 2: , 3: , 4: 飲料Total, 5: 11
                 if offset == 0:
                     store = results[1][1]
-                options = results[options_col + offset][1].strip()
                 if not results[price_col + offset][1]:
                     continue
                 price = float(results[price_col + offset][1].strip())
@@ -459,8 +480,11 @@ def process_order_group2(db, order_id, data):
                     quantity = int(qty_str)
                     if store:
                         store_id = db.get_store_id_by_name(store)
+                        last_store_id = store_id
                     else:
                         store_id = db.get_store_id_by_product(name)
+                        if not store_id:
+                            store_id = last_store_id
                     
                     db.save_order_item(order_id, name, store_id, options, price, quantity, store)
             elif results[total_col-1][1] == "飲料Total":                
@@ -472,22 +496,6 @@ def process_order_group2(db, order_id, data):
 def process_delivery(delivery_str):
     delivery = delivery_str.split(" ")
     return delivery[0].strip(), (" ".join(delivery[1:])).strip()
-
-def process_order(db, delivery_date, order):
-    date = order['Submission Date']
-    if not date.strip():
-        return
-    print(date)
-    order_data = Order("")
-    order_data.set_from_jotform(order)
-    if delivery_date != order_data.delivery_date:
-        return #skipping
-    order_id = db.save_order(order_data)
-    total = process_order_group1(db, order_id, order['食物: Products'])
-    total += process_order_group2(db, order_id, order['冰品飲料'])
-    print("total: %f" % total)
-    db.update_total(order_id, total)
-
 def process_extra_order(db, delivery_date, wk):
     extra_order = wk.worksheet("ExtraOrders").get_all_records()
     for extra in extra_order:
@@ -697,7 +705,7 @@ def analyze_customers(db, wk, delivery_date):
     current_name=None
     customer_total = total_items = 0
     row_num = 0
-    for i, row in enumerate(rows):
+    for  row in rows:
         #print(row)
         location = row[0]
         order_uid = row[1]
@@ -712,8 +720,9 @@ def analyze_customers(db, wk, delivery_date):
             current_name = customer
             row_num = add_header_user2(store, row_num, location, order_uid, customer, comment,address, email, phone) + 1
         elif current_name != customer:
-            store.append_cell(row_num, 5, total_items)
-            store.append_cell(row_num, 6, dollar(customer_total))
+            #store.append_cell(row_num, 5, total_items)
+            #store.append_cell(row_num, 6, dollar(customer_total))
+            row_num = close_customer(store, row_num, total_items, customer_total)
             row_num = add_header_user2(store, row_num, location, order_uid, customer, comment, address, email, phone) + 1
             customer_total = total_items = 0
             current_name = customer
@@ -724,13 +733,23 @@ def analyze_customers(db, wk, delivery_date):
         store.append_cell(row_num, 3, row[5])
         store.append_cell(row_num, 4, price)
         store.append_cell(row_num, 5, quantity)
-        total = calc_total(quantity, price, row[8])
+        total = price * quantity
         store.append_cell(row_num, 6, dollar(total))
         row_num += 1
         customer_total += total
+    close_customer(store, row_num, total_items, customer_total)
+    store.submit()
+
+def close_customer(store, row_num, total_items, customer_total):
     store.append_cell(row_num, 5, total_items)
     store.append_cell(row_num, 6, dollar(customer_total))
-    store.submit()
+    row_num += 1
+    store.append_cell(row_num, 5, "TAX")
+    tax_amount = round(customer_total * 0.08875, 2)
+    store.append_cell(row_num, 6, tax_amount)
+    store.append_cell(row_num, 7, customer_total + tax_amount)
+    return row_num + 1
+
 
 def get_sheet(wk, name, clean = True):
     result = None
@@ -753,7 +772,7 @@ def get_sheet(wk, name, clean = True):
 
 def main():
     retrieve_records = True
-    date = "7/10"
+    date = "9/1"
     is_customer_only = False
     db = Database("bien.db")
     db.init_db(retrieve_records)
