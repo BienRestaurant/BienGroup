@@ -335,6 +335,7 @@ class StoreData:
     def create_sheet(self, worksheet, delivery_date):
         self.delivery_date = delivery_date
         self.file_name = self.name + " " + delivery_date
+        self.worksheet = worksheet
         self.worksheet_id = worksheet.id
         self.sheet = get_sheet(worksheet, self.file_name)
 
@@ -351,9 +352,48 @@ class StoreData:
     def append_format(self, range, fmt):
         self.formats.append((range, fmt))
 
-    def submit(self):
+    def adjust_columns(self, auto):
+        sheetId = self.sheet._properties['sheetId']
+        if (auto):
+            body = {
+                "requests": [
+                    {
+                        "autoResizeDimensions": {
+                            "dimensions": {
+                                "sheetId": sheetId,
+                                "dimension": "COLUMNS",
+                                "startIndex": 0,  # Please set the column index.
+                                "endIndex": 2  # Please set the column index.
+                            }
+                        }
+                    }
+                ]
+            }
+        else:
+            body = {
+                "requests": [
+                    {
+                        "updateDimensionProperties": {
+                            "range": {
+                                "sheetId": sheetId,
+                                "dimension": "COLUMNS",
+                                "startIndex": 0,  # Please set the column index.
+                                "endIndex": 1  # Please set the column index.
+                            },
+                            "properties": {
+                                "pixelSize": 140
+                            },
+                            "fields": "pixelSize"
+                        }
+                    }
+                ]
+            }
+        res = self.worksheet.batch_update(body)
+
+    def submit(self, auto_adjust = False):
         self.sheet.update_cells(self.cells)
         format_cell_ranges(self.sheet, self.formats)
+        self.adjust_columns(auto_adjust)
         url = self.get_link()
         #print("exporting from: %s" % url)
         r = requests.get(url)
@@ -471,7 +511,7 @@ def process_order_group2(db, order_id, data):
             #user can just input options
             if results[total_col][1] and (name or options): #0: 11, 1: , 2: , 3: , 4: 飲料Total, 5: 11
                 if offset == 0:
-                    store = results[1][1]
+                    store = results[1][1].strip()
                 if not results[price_col + offset][1]:
                     continue
                 price = float(results[price_col + offset][1].strip())
@@ -738,7 +778,7 @@ def analyze_customers(db, wk, delivery_date):
         row_num += 1
         customer_total += total
     close_customer(store, row_num, total_items, customer_total)
-    store.submit()
+    store.submit(True)
 
 def close_customer(store, row_num, total_items, customer_total):
     store.append_cell(row_num, 5, total_items)
@@ -771,8 +811,8 @@ def get_sheet(wk, name, clean = True):
     return result
 
 def main():
-    retrieve_records = True
-    date = "9/1"
+    retrieve_records = False
+    date = "9/25"
     is_customer_only = False
     db = Database("bien.db")
     db.init_db(retrieve_records)
