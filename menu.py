@@ -812,7 +812,7 @@ def get_sheet(wk, name, clean = True):
 
 def main():
     retrieve_records = False
-    date = "9/25"
+    date = "10/1"
     is_customer_only = False
     db = Database("bien.db")
     db.init_db(retrieve_records)
