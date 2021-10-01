@@ -199,11 +199,11 @@ class Database:
         self.store_lookup = {}
         self.store_lookup_by_id = {}
         for store in stores:
-            self.store_lookup[store.name] = store
+            self.store_lookup[store.name.lower()] = store
             self.store_lookup_by_id[store.id] = store
             if store.alias:
                 for a in store.alias.split(","):
-                    self.store_lookup[a] = store
+                    self.store_lookup[a.lower()] = store
     
     def update_product_lookup(self, products):
         self.product_lookup = {}
@@ -212,13 +212,11 @@ class Database:
             self.product_lookup[product.name] = product
     
     def get_store_by_name(self, name):
-        s = self.store_lookup.get(name)
-        if s:
-            return s
-        return None
+        s = self.store_lookup.get(name.lower())
+        return s
 
     def get_store_id_by_name(self, name):
-        s = self.store_lookup.get(name)
+        s = self.get_store_by_name(name)
         if s:
             return s.id
         return None
@@ -811,9 +809,9 @@ def get_sheet(wk, name, clean = True):
     return result
 
 def main():
-    retrieve_records = False
-    date = "10/1"
-    is_customer_only = False
+    retrieve_records = True
+    date = "10/2"
+    is_customer_only = True
     db = Database("bien.db")
     db.init_db(retrieve_records)
     process_spreadsheet(db, retrieve_records, date, is_customer_only)
