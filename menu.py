@@ -71,11 +71,16 @@ class Product:
     store_id: int
     name: str
     options: str = None
-    price: int = None
+    price: float = None
+    cost: float = None
+    store: Store = None
 
     @classmethod
     def fromCsv(cls, item):
-        return cls(int(item['store_id']), item['name'].strip(), item['options'].strip(), float(item['price']))
+        print(item)
+        price = item['price'] or 0
+        cost = item['cost'] or price
+        return cls(int(item['store_id']), item['name'].strip(), item['options'].strip(), float(price), float(cost))
 
 class Database:
     def __init__(self, db_file):
@@ -161,6 +166,7 @@ class Database:
                                             name text NOT NULL,
                                             options text,
                                             price numeric,
+                                            cost numeric,
                                             comment text,
                                             FOREIGN KEY (store_id) REFERENCES stores (id)
                                         ); """
@@ -183,15 +189,18 @@ class Database:
             store = Store.fromCsv(item)
             cur.execute(insert_sql, (store.id, store.name, store.alias, store.tax))
             stores.append(store)
+        self.update_store_lookup(stores)
 
-        insert_sql = "insert into products (store_id, name, options, price) values (?,?,?,?)"
+        insert_sql = "insert into products (store_id, name, options, price, cost) values (?,?,?,?,?)"
         products = []
         for item in products_csv:
             p = Product.fromCsv(item)
-            cur.execute(insert_sql, (p.store_id, p.name, p.options, p.price))
-            products.append(p)
+            store = self.store_lookup_by_id.get(p.store_id)
+            if store:
+                cur.execute(insert_sql, (p.store_id, p.name, p.options, p.price, p.cost))
+                products.append(p)
+                p.store = store
 
-        self.update_store_lookup(stores)
         self.update_product_lookup(products)
         return stores
 
@@ -207,10 +216,21 @@ class Database:
     
     def update_product_lookup(self, products):
         self.product_lookup = {}
+        self.product_lookup2 = {}
         for product in products:
             #print("creating lookup %s = %d" % (product.name, product.store_id))
             self.product_lookup[product.name] = product
+            self.product_lookup2[(product.name, product.options)] = product
     
+    def find_price(self, store_name, name, option, price):
+        p = self.product_lookup2.get((name, option))
+        if p is None:
+            p = self.product_lookup.get(name)
+        if p:
+            print("Found %s, %s price=%f" %( name, option, p.cost))
+            return p.cost
+        return price
+
     def get_store_by_name(self, name):
         s = self.store_lookup.get(name.lower())
         return s
@@ -280,7 +300,6 @@ class Database:
             item.quantity = row[7]
             items.append(item)
         return items
-
 
     def query_customers(self, delivery_date):
         sql ="""select o.location, o.order_uid, o.name, c.name as store, i.product_name as product, i.product_options as options, i.product_unit_price as price, i.quantity as quantity, c.tax, o.comment, o.delivery_address as address, o.email, o.phone
@@ -402,7 +421,7 @@ class StoreData:
         with open(file, 'wb') as saveFile:
             saveFile.write(r.content)
 
-def process_spreadsheet(db, retrieve_records, delivery_date, is_customer_only):
+def process_spreadsheet(db, retrieve_records, delivery_date, is_customer_only, current_group):
     # use creds to create a client to interact with the Google Drive API
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
     creds = ServiceAccountCredentials.from_json_keyfile_name('client_secret.json', scope)
@@ -411,17 +430,18 @@ def process_spreadsheet(db, retrieve_records, delivery_date, is_customer_only):
     # Find a workbook by name and open the first sheet
     # Make sure you use the right name here.
     wk = client.open("阿扁在威郡")
+    store_csv = wk.worksheet("Stores").get_all_records()
+    categories = [st for st in store_csv if current_group in st["group"] ]
     if retrieve_records:
         products = wk.worksheet("Products").get_all_records()
-        categories = wk.worksheet("Stores").get_all_records()
         stores = db.init_products(products, categories)
-        process_order_sheet(db, delivery_date, wk, "Orders")
-        process_order_sheet(db, delivery_date, wk, "Orders-A")
-        process_order_sheet(db, delivery_date, wk, "Orders-A1")
-        process_order_sheet(db, delivery_date, wk, "Order-B")
-        process_extra_order(db, delivery_date, wk)
+        #process_order_sheet(db, delivery_date, wk, "Orders")
+        #process_order_sheet(db, delivery_date, wk, "Orders-A")
+        #process_order_sheet(db, delivery_date, wk, "Orders-A1")
+        #process_order_sheet(db, delivery_date, wk, "Order-B")
+        #process_extra_order(db, delivery_date, wk)
+        process_order_sheet(db, delivery_date, wk, "Orders-B1128")
     else:
-        categories = wk.worksheet("Stores").get_all_records()
         stores = [Store(cat['id'], cat['name']) for cat in categories]
     
     output_wk = client.open("阿扁美食團出菜")
@@ -430,6 +450,7 @@ def process_spreadsheet(db, retrieve_records, delivery_date, is_customer_only):
     if not is_customer_only:
         for store in stores:
             if i >= resume_id:
+            #if store.id == 10:
                 analyze_store(db, output_wk, delivery_date, store.name)
             i+=1
     analyze_customers(db, output_wk, delivery_date)
@@ -474,7 +495,7 @@ def process_order_group1(db, order_id, data):
                 for v in values.split(", "):
                     if v.startswith("ount:"): #ount: 16.00 USD
                         price = float(v.split(" ")[1])
-                    elif v.startswith("Quantity:"): #Quantity: 1
+                    elif v.startswith("Quantity:") or v.startswith("請填小費金額於下方"): #Quantity: 1
                         quantity = int(v.split(" ")[1])
                     else:
                         options.append(v.split(": ")[1])
@@ -642,7 +663,8 @@ def close_store(store, row_num, store_total):
         
 def calc_total(qty, price, tax):
     tax_rate = 0.08875
-    return round(price * qty * (1 + tax_rate* (tax or 0)), 2)
+    after_tax = round(price * qty * (1 + tax_rate* (tax or 0)), 2)
+    return after_tax
 
 def analyze_store(db, wk, delivery_date, store_name):
     rows = db.query_store(store_name, delivery_date)
@@ -664,7 +686,8 @@ def analyze_store(db, wk, delivery_date, store_name):
             if j == 2:
                 qty = value
             elif j == 3:
-                price = value
+                price = db.find_price(store_name, row[0], row[1], value)
+                value = price
             elif j== 4: #tax
                 subtotal = calc_total(qty, price, value)
                 value = subtotal
@@ -782,8 +805,8 @@ def close_customer(store, row_num, total_items, customer_total):
     store.append_cell(row_num, 5, total_items)
     store.append_cell(row_num, 6, dollar(customer_total))
     row_num += 1
-    store.append_cell(row_num, 5, "TAX")
-    tax_amount = round(customer_total * 0.08875, 2)
+    store.append_cell(row_num, 5, "Handling")
+    tax_amount = round(customer_total * 0.12, 2)
     store.append_cell(row_num, 6, tax_amount)
     store.append_cell(row_num, 7, customer_total + tax_amount)
     return row_num + 1
@@ -810,11 +833,12 @@ def get_sheet(wk, name, clean = True):
 
 def main():
     retrieve_records = True
-    date = "10/2"
-    is_customer_only = True
+    date = "12/1"
+    is_customer_only = False
+    current_group = 'B'
     db = Database("bien.db")
     db.init_db(retrieve_records)
-    process_spreadsheet(db, retrieve_records, date, is_customer_only)
+    process_spreadsheet(db, retrieve_records, date, is_customer_only, current_group)
     if db:
         db.close()
 
