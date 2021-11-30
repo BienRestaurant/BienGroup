@@ -472,6 +472,7 @@ def process_order(db, delivery_date, order):
     if delivery_date != order_data.delivery_date:
         return #skipping
     order_id = db.save_order(order_data)
+    total = 0
     total = process_order_group1(db, order_id, order['食物: Products'])
     total += process_order_group2(db, order_id, order['冰品飲料'])
     print("total: %f" % total)
@@ -491,7 +492,7 @@ def process_order_group1(db, order_id, data):
                 #print("item name:" + name)
                 quantity = 1
                 price = 0
-                values = results[1].split(")")[0] #ount: 16.00 USD, Quantity: 1)
+                values = results[1][0:results[1].rindex(")")] #ount: 16.00 USD, Quantity: 1)
                 for v in values.split(", "):
                     if v.startswith("ount:"): #ount: 16.00 USD
                         price = float(v.split(" ")[1])
@@ -546,7 +547,7 @@ def process_order_group2(db, order_id, data):
                             store_id = last_store_id
                     
                     db.save_order_item(order_id, name, store_id, options, price, quantity, store)
-            elif results[total_col-1][1] == "飲料Total":                
+            elif results[total_col-1][1] == "飲料Total" or results[total_col-1][1] == "自填Total":                
                 total = results[total_col][1]
     if total:
         return float(total)
@@ -721,9 +722,9 @@ def analyze_store(db, wk, delivery_date, store_name):
     store.cells.append(gspread.Cell(row_num-1, 4, total_items))
     store.submit()
 
-def add_header_user2(store, row_num, location, order_uid, customer, comment, address, email, phone):
+def add_header_user2(index, store, row_num, location, order_uid, customer, comment, address, email, phone):
     row_num += 1
-    store.append_cell(row_num, 1, location)
+    store.append_cell(row_num, 1, "%s #%d" % (location, index))
     store.append_cell(row_num, 2, order_uid)
     store.append_cell(row_num, 3, customer)
     store.append_cell(row_num, 4, comment)
@@ -766,6 +767,7 @@ def analyze_customers(db, wk, delivery_date):
     current_name=None
     customer_total = total_items = 0
     row_num = 0
+    index = 1
     for  row in rows:
         #print(row)
         location = row[0]
@@ -779,12 +781,14 @@ def analyze_customers(db, wk, delivery_date):
         phone = row[12]
         if not current_name:
             current_name = customer
-            row_num = add_header_user2(store, row_num, location, order_uid, customer, comment,address, email, phone) + 1
+            row_num = add_header_user2(index, store, row_num, location, order_uid, customer, comment,address, email, phone) + 1
+            index += 1
         elif current_name != customer:
             #store.append_cell(row_num, 5, total_items)
             #store.append_cell(row_num, 6, dollar(customer_total))
             row_num = close_customer(store, row_num, total_items, customer_total)
-            row_num = add_header_user2(store, row_num, location, order_uid, customer, comment, address, email, phone) + 1
+            row_num = add_header_user2(index, store, row_num, location, order_uid, customer, comment, address, email, phone) + 1
+            index += 1
             customer_total = total_items = 0
             current_name = customer
 
@@ -833,7 +837,7 @@ def get_sheet(wk, name, clean = True):
 
 def main():
     retrieve_records = True
-    date = "12/1"
+    date = "12/2"
     is_customer_only = False
     current_group = 'B'
     db = Database("bien.db")
