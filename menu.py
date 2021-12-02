@@ -54,7 +54,6 @@ class OrderItem:
     price: float = 0.0
     order: Order = None
 
-
 @dataclass
 class Store:
     id: int
@@ -217,15 +216,24 @@ class Database:
     def update_product_lookup(self, products):
         self.product_lookup = {}
         self.product_lookup2 = {}
+        self.product_lookup3 = {}
         for product in products:
             #print("creating lookup %s = %d" % (product.name, product.store_id))
             self.product_lookup[product.name] = product
-            self.product_lookup2[(product.name, product.options)] = product
+            if product.name not in self.product_lookup3:
+                self.product_lookup3[product.name] = []
+            self.product_lookup3[product.name].append(product)            
+            self.product_lookup2[(product.name, product.options.lower())] = product
     
-    def find_price(self, store_name, name, option, price):
-        p = self.product_lookup2.get((name, option))
+    def find_cost(self, store_name, name, option, price):
+        p = self.product_lookup2.get((name, option.lower()))
         if p is None:
-            p = self.product_lookup.get(name)
+            product_list = self.product_lookup3.get(name)
+            if product_list:
+                for product in product_list:
+                    if product.options.lower() in option.lower():
+                        p = product
+                        break
         if p:
             print("Found %s, %s price=%f" %( name, option, p.cost))
             return p.cost
@@ -687,7 +695,7 @@ def analyze_store(db, wk, delivery_date, store_name):
             if j == 2:
                 qty = value
             elif j == 3:
-                price = db.find_price(store_name, row[0], row[1], value)
+                price = db.find_cost(store_name, row[0], row[1], value)
                 value = price
             elif j== 4: #tax
                 subtotal = calc_total(qty, price, value)
@@ -837,7 +845,7 @@ def get_sheet(wk, name, clean = True):
 
 def main():
     retrieve_records = True
-    date = "12/2"
+    date = "12/5"
     is_customer_only = False
     current_group = 'B'
     db = Database("bien.db")
