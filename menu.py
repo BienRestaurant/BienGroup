@@ -527,8 +527,8 @@ def process_order_group1(db, order_id, data):
             options = [] 
             if line.startswith("Subtotal:") or line.startswith("Tax:"): #Subtotal: 144.50
                 continue
-            elif line.startswith("Total:"): #Total: 147.50
-                total = float(line.split(": ")[1])
+            elif line.startswith("Total:"): #Total: 147.50 USD
+                total = float(line.split(" ")[1])
             else:
                 results = line.split("(Am") #傳統客家小炒  (Amount: 16.00 USD, Quantity: 1)
                 name = results[0].strip()
@@ -555,6 +555,8 @@ def process_order_group1(db, order_id, data):
     return total
 
 def process_order_group2(db, order_id, data):
+    if not data or not data.strip:
+        return 0
     name_col = 2
     options_col = 3
     price_col = 4
@@ -895,7 +897,7 @@ def get_sheet(wk, name, clean = True):
 
 def main():
     retrieve_records = True
-    date = "2/15"
+    date = "3/30"
     is_customer_only = False
     resume_id = 1
     current_group = 'B'
