@@ -80,10 +80,17 @@ class Product:
 
     @classmethod
     def fromCsv(cls, item):
-        print(item)
+        #print(item)
         price = item['price'] or 0
         cost = item['cost'] or price
         return cls(int(item['store_id']), item['name'].strip(), item['options'].strip(), float(price), float(cost))
+    
+    @classmethod
+    def fromQuery(cls, item):
+        return cls(0, item[0], item[1], float(item[2]))
+
+    def isToll(self):
+        return self.name.startswith("**Toll")
 
 class Database:
     def __init__(self, db_file):
@@ -239,8 +246,8 @@ class Database:
                         p = product
                         break
         if p:
-            print("Found %s, %s price=%f" %( name, option, p.cost))
             return p.cost
+        print("Cost not found %s, %s use the same price=%f" %( name, option, price))
         return price
 
     def get_store_by_name(self, name):
@@ -257,7 +264,7 @@ class Database:
         p = self.product_lookup.get(name)
         if p:
             return self.store_lookup_by_id[p.store_id]
-        if name != "**配送地點**":
+        if not name.startswith("**"):
             print(name +" is not found.")
         return None
 
@@ -265,7 +272,7 @@ class Database:
         p = self.product_lookup.get(name)
         if p:
             return p.store_id
-        if name != "**配送地點**":
+        if not name.startswith("**"):
             print(name +" is not found.")
         return None
 
@@ -314,7 +321,7 @@ class Database:
         return items
 
     def query_customers(self, delivery_date):
-        sql ="""select o.location, o.order_uid, o.name, c.name as store, i.product_name as product, i.product_options as options, i.product_unit_price as price, i.quantity as quantity, c.tax, o.comment, o.delivery_address as address, o.email, o.phone
+        sql ="""select o.location, o.order_uid, o.name, c.name as store, i.product_name as product, i.product_options as options, i.product_unit_price as price, i.quantity as quantity, c.tax, o.comment, o.delivery_address as address, o.email, o.phone, o.order_date
             from order_items i
             left join orders o
             on i.order_id = o.id
@@ -326,7 +333,10 @@ class Database:
         print("Analyzing customers (%s)..." % (delivery_date))
         cur = self.conn.cursor()
         cur.execute(sql, (delivery_date, ))
-        return cur.fetchall()
+        orders = []
+        for c in cur.fetchall():
+            orders.append(CustomerOrder.fromCsv(c))
+        return orders
 
     def save_order(self, order):
         order_sql = "insert into orders (order_date, order_uid, name, email, phone, submission_id, payment, comment, delivery_date, location, delivery_address) values (?,?,?,?,?,?,?,?,?,?,?)"
@@ -433,6 +443,27 @@ class StoreData:
         with open(file, 'wb') as saveFile:
             saveFile.write(r.content)
 
+@dataclass
+class CustomerOrder:
+    location: str
+    order_uid: str
+    customer: str
+    store_name: str
+    product: Product
+    quantity :int
+    tax: str
+    comment: str
+    address: str
+    email: str
+    phone: str
+    order_date: str
+
+    @classmethod
+    def fromCsv(cls, row):
+        #print(row)
+        product = Product.fromQuery(row[4:7])
+        return cls(row[0], row[1], row[2], row[3], product, int(row[7]), row[8], row[9], row[10], row[11], row[12],row[13] )
+
 def process_spreadsheet(db, retrieve_records, delivery_date, is_customer_only, current_group, resume_id):
     # use creds to create a client to interact with the Google Drive API
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
@@ -531,6 +562,7 @@ def process_order_group2(db, order_id, data):
     offset = 0
     store = ''
     last_store_id = None
+    total = 0
     for line in (data+" ").split("\n"): 
         if line and not line.startswith("0: #,"): #0: #, 1: 品項, 2: 配料, 3: 單價, 4: 數量, 5: 總價
             results = [item.split(": ") for item in line.split(", ")] #0: 1, 1: 手工豆花, 2: 芋圓, 3: 5.50, 4: 2, 5: 11
@@ -561,9 +593,7 @@ def process_order_group2(db, order_id, data):
                     db.save_order_item(order_id, name, store_id, options, price, quantity, store)
             elif results[total_col-1][1] == "飲料Total" or results[total_col-1][1] == "自填Total":                
                 total = results[total_col][1]
-    if total:
-        return float(total)
-    return 0
+    return float(total)
 
 def process_delivery(delivery_str):
     delivery = delivery_str.split(" ")
@@ -718,13 +748,13 @@ def analyze_store(db, wk, delivery_date, store1):
     for item in items:
         order = item.order
         if not current_name:
-            current_name = order.name
+            current_name = order.order_uid
             row_num = add_header_user(store, row_num, order) + 1
-        elif current_name != order.name:
+        elif current_name != order.order_uid:
             store.cells.append(gspread.Cell(row_num-1, 4, total_items))
             row_num = add_header_user(store, row_num, order) + 1
             total_items = 0
-            current_name = order.name
+            current_name = order.order_uid
         total_items += int(item.quantity)
         store.cells.append(gspread.Cell(row_num, 1, item.product))
         store.cells.append(gspread.Cell(row_num, 2, item.options))
@@ -734,23 +764,24 @@ def analyze_store(db, wk, delivery_date, store1):
     store.cells.append(gspread.Cell(row_num-1, 4, total_items))
     store.submit(True)
 
-def add_header_user2(index, store, row_num, location, order_uid, customer, comment, address, email, phone):
+def add_header_user2(index, store, row_num, o):
     row_num += 1
-    store.append_cell(row_num, 1, "%s #%d" % (location, index))
-    store.append_cell(row_num, 2, order_uid)
-    store.append_cell(row_num, 3, customer)
-    store.append_cell(row_num, 4, comment)
+    store.append_cell(row_num, 1, "%s #%d" % (o.location, index))
+    store.append_cell(row_num, 2, o.order_uid)
+    store.append_cell(row_num, 3, o.customer)
+    store.append_cell(row_num, 4, o.order_date)
+    store.append_cell(row_num, 5, o.comment)
     fmt = cellFormat(
     backgroundColor=Color.fromHex('#ffff00'),
     textFormat=textFormat(bold=True, foregroundColor=color(0, 0, 0)),
     horizontalAlignment='CENTER',
     verticalAlignment='MIDDLE'
     )
-    store.append_format("A%d:C%d" % (row_num, row_num), fmt)
+    store.append_format("A%d:D%d" % (row_num, row_num), fmt)
     row_num += 1
-    store.append_cell(row_num, 1, email)
-    store.append_cell(row_num, 2, phone)
-    store.append_cell(row_num, 3, address)
+    store.append_cell(row_num, 1, o.email)
+    store.append_cell(row_num, 2, o.phone)
+    store.append_cell(row_num, 3, o.address)
     row_num += 1
     store.append_cell(row_num, 1, "Store")
     store.append_cell(row_num, 2, "Product")
@@ -770,61 +801,76 @@ def add_header_user2(index, store, row_num, location, order_uid, customer, comme
 def dollar(amount):
     return "${:.2f}".format(amount)
 
+@dataclass
+class Total:
+    items: int
+    customer: float
+    toll: float
+    handling: float
+
 def analyze_customers(db, wk, delivery_date):
-    rows = db.query_customers(delivery_date)
-    if len(rows) == 0:
+    orders = db.query_customers(delivery_date)
+    if len(orders) == 0:
         return
     store = StoreData("人客")
     store.create_sheet(wk, delivery_date)
     current_name=None
-    customer_total = total_items = 0
+    toll_total = order_total = customer_total = total_items = 0
     row_num = 0
     index = 1
-    for  row in rows:
+    for  o in orders:
         #print(row)
-        location = row[0]
-        order_uid = row[1]
-        customer = row[2]
-        price = row[6]
-        quantity = row[7]
-        comment = row[9]
-        address = row[10]
-        email = row[11]
-        phone = row[12]
         if not current_name:
-            current_name = customer
-            row_num = add_header_user2(index, store, row_num, location, order_uid, customer, comment,address, email, phone) + 1
+            current_name = o.order_uid
+            row_num = add_header_user2(index, store, row_num, o) + 1
             index += 1
-        elif current_name != customer:
+        elif current_name != o.order_uid:
             #store.append_cell(row_num, 5, total_items)
             #store.append_cell(row_num, 6, dollar(customer_total))
             row_num = close_customer(store, row_num, total_items, customer_total)
-            row_num = add_header_user2(index, store, row_num, location, order_uid, customer, comment, address, email, phone) + 1
+            row_num = add_header_user2(index, store, row_num, o) + 1
             index += 1
+            order_total += customer_total
             customer_total = total_items = 0
-            current_name = customer
+            current_name = o.order_uid
 
-        total_items += int(quantity)
-        store.append_cell(row_num, 1, row[3])
-        store.append_cell(row_num, 2, row[4])
-        store.append_cell(row_num, 3, row[5])
-        store.append_cell(row_num, 4, price)
-        store.append_cell(row_num, 5, quantity)
-        total = price * quantity
+        total_items += int(o.quantity)
+        store.append_cell(row_num, 1, o.store_name)
+        store.append_cell(row_num, 2, o.product.name)
+        store.append_cell(row_num, 3, o.product.options)
+        store.append_cell(row_num, 4, o.product.price)
+        store.append_cell(row_num, 5, o.quantity)
+        total = o.product.price * o.quantity
         store.append_cell(row_num, 6, dollar(total))
         row_num += 1
         customer_total += total
-    close_customer(store, row_num, total_items, customer_total)
+        if o.product.isToll == True:
+            toll_total += total
+    row_num = close_customer(store, row_num, total_items, customer_total)
+    close_order(store, row_num, index-1, order_total+customer_total, toll_total)
     store.submit(True)
 
 def close_customer(store, row_num, total_items, customer_total):
     store.append_cell(row_num, 5, total_items)
     store.append_cell(row_num, 6, dollar(customer_total))
     row_num += 1
-    store.append_cell(row_num, 5, "Handling")
+    store.append_cell(row_num, 4, "Handling")
     tax_amount = round(customer_total * 0.12, 2)
-    store.append_cell(row_num, 6, tax_amount)
-    store.append_cell(row_num, 7, customer_total + tax_amount)
+    store.append_cell(row_num, 5, tax_amount)
+    store.append_cell(row_num, 6, customer_total + tax_amount)
+    return row_num + 1
+
+def close_order(store, row_num, total_items, customer_total, toll_total):
+    row_num += 1
+    store.append_cell(row_num, 5, "Total Orders")
+    store.append_cell(row_num, 6, "Orders Total")
+    store.append_cell(row_num, 7, "Orders Average")
+    #store.append_cell(row_num, 8, "Toll Charge")
+    row_num += 1
+    store.append_cell(row_num, 5, total_items)
+    store.append_cell(row_num, 6, dollar(customer_total))
+    store.append_cell(row_num, 7, dollar(customer_total/total_items))
+    #store.append_cell(row_num, 8, dollar(toll_total))
     return row_num + 1
 
 
@@ -849,8 +895,8 @@ def get_sheet(wk, name, clean = True):
 
 def main():
     retrieve_records = True
-    date = "2/19"
-    is_customer_only = True
+    date = "2/15"
+    is_customer_only = False
     resume_id = 1
     current_group = 'B'
     #db = Database("/Users/lewis/Downloads/bien.db")
