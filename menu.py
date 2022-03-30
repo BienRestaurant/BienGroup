@@ -1,3 +1,6 @@
+#pip install gspread
+#pip install oauth2client
+#pip install gspread_formatting
 import gspread
 #import pandas as pd
 from oauth2client.service_account import ServiceAccountCredentials
@@ -10,10 +13,11 @@ import os
 from dataclasses import dataclass
 from datetime import datetime
 
+ALL = "ALL"
 @dataclass
 class Order:
     name: str
-    id: int = 0,
+    id: int = 0
     order_uid: int = 0
     order_date: str = None
     submission_id: str = None
@@ -265,7 +269,7 @@ class Database:
             print(name +" is not found.")
         return None
 
-    def query_store(self, store_name, delivery_date):
+    def query_store(self, store, delivery_date):
         sql ="""select i.product_name as product, i.product_options as options, sum(i.quantity) as quantity, i.product_unit_price as price, c.tax as tax
             from order_items i
             left join stores c
@@ -276,9 +280,9 @@ class Database:
             group by c.name, i.product_name, i.product_options, i.product_unit_price
             order by c.id, i.product_name
         """
-        print("Analyzing %s orders..." % (store_name))
+        print("Analyzing %s(id:%d)orders..." % (store.name, store.id))
         cur = self.conn.cursor()
-        cur.execute(sql, (delivery_date, store_name))
+        cur.execute(sql, (delivery_date, store.name))
         rows = cur.fetchall()
         return rows
 
@@ -429,7 +433,7 @@ class StoreData:
         with open(file, 'wb') as saveFile:
             saveFile.write(r.content)
 
-def process_spreadsheet(db, retrieve_records, delivery_date, is_customer_only, current_group):
+def process_spreadsheet(db, retrieve_records, delivery_date, is_customer_only, current_group, resume_id):
     # use creds to create a client to interact with the Google Drive API
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
     creds = ServiceAccountCredentials.from_json_keyfile_name('client_secret.json', scope)
@@ -453,14 +457,14 @@ def process_spreadsheet(db, retrieve_records, delivery_date, is_customer_only, c
         stores = [Store(cat['id'], cat['name']) for cat in categories]
     
     output_wk = client.open("阿扁美食團出菜")
-    resume_id = 1
-    i = 1
     if not is_customer_only:
         for store in stores:
-            if i >= resume_id:
-            #if store.id == 10:
-                analyze_store(db, output_wk, delivery_date, store.name)
-            i+=1
+            if store.id >= resume_id:
+                analyze_store(db, output_wk, delivery_date, store)
+
+    client.session.close
+    client = gspread.authorize(creds)
+    output_wk = client.open("阿扁美食團出菜")
     analyze_customers(db, output_wk, delivery_date)
 
 def process_order_sheet(db, delivery_date, work_sheet, sheet_name):
@@ -477,7 +481,7 @@ def process_order(db, delivery_date, order):
     print(date)
     order_data = Order("")
     order_data.set_from_jotform(order)
-    if delivery_date != order_data.delivery_date:
+    if delivery_date != ALL and delivery_date != order_data.delivery_date:
         return #skipping
     order_id = db.save_order(order_data)
     total = 0
@@ -675,12 +679,12 @@ def calc_total(qty, price, tax):
     after_tax = round(price * qty * (1 + tax_rate* (tax or 0)), 2)
     return after_tax
 
-def analyze_store(db, wk, delivery_date, store_name):
-    rows = db.query_store(store_name, delivery_date)
+def analyze_store(db, wk, delivery_date, store1):
+    rows = db.query_store(store1, delivery_date)
     if len(rows) == 0:
         return
     
-    store = StoreData(store_name)
+    store = StoreData(store1.name)
     #store_cells = []
     store_total = 0
     #store_sheet = get_sheet(wk, store_name + " " + delivery_date)
@@ -695,7 +699,7 @@ def analyze_store(db, wk, delivery_date, store_name):
             if j == 2:
                 qty = value
             elif j == 3:
-                price = db.find_cost(store_name, row[0], row[1], value)
+                price = db.find_cost(store1.name, row[0], row[1], value)
                 value = price
             elif j== 4: #tax
                 subtotal = calc_total(qty, price, value)
@@ -706,7 +710,7 @@ def analyze_store(db, wk, delivery_date, store_name):
 
     close_store(store, row_num, store_total)
 
-    items = db.query_store_customers(store_name, delivery_date)    
+    items = db.query_store_customers(store1.name, delivery_date)    
     row_num += 2
     current_name=None
     total_items = 0
@@ -728,7 +732,7 @@ def analyze_store(db, wk, delivery_date, store_name):
         row_num += 1
 
     store.cells.append(gspread.Cell(row_num-1, 4, total_items))
-    store.submit()
+    store.submit(True)
 
 def add_header_user2(index, store, row_num, location, order_uid, customer, comment, address, email, phone):
     row_num += 1
@@ -845,12 +849,14 @@ def get_sheet(wk, name, clean = True):
 
 def main():
     retrieve_records = True
-    date = "12/19"
-    is_customer_only = False
+    date = "2/19"
+    is_customer_only = True
+    resume_id = 1
     current_group = 'B'
-    db = Database("~/Downloads/bien.db")
+    #db = Database("/Users/lewis/Downloads/bien.db")
+    db = Database("c:/Users/lewis/Downloads/bien.db")
     db.init_db(retrieve_records)
-    process_spreadsheet(db, retrieve_records, date, is_customer_only, current_group)
+    process_spreadsheet(db, retrieve_records, date, is_customer_only, current_group, resume_id)
     if db:
         db.close()
 
