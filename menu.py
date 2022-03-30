@@ -845,10 +845,10 @@ def get_sheet(wk, name, clean = True):
 
 def main():
     retrieve_records = True
-    date = "12/5"
+    date = "12/19"
     is_customer_only = False
     current_group = 'B'
-    db = Database("bien.db")
+    db = Database("~/Downloads/bien.db")
     db.init_db(retrieve_records)
     process_spreadsheet(db, retrieve_records, date, is_customer_only, current_group)
     if db:
